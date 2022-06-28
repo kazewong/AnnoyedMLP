@@ -6,18 +6,24 @@ import jax
 from annoy import AnnoyIndex
 import numpy as np
 
-f = 23  # Length of item vector that will be indexed
+f = 5  # Length of item vector that will be indexed
 
 t = AnnoyIndex(f, 'angular')
 
-data = np.random.uniform(size=(1000,23))
+data = np.random.uniform(size=(1000,5))
 for i in range(1000):
     t.add_item(i, data[i])
 
 t.build(10) # 10 trees
 
 key = jax.random.PRNGKey(1071)
-data = jax.random.randint(key, shape=(100,8), minval = 0, maxval = 99)
+data = jax.random.uniform(key, (1000, 5))
+
+index = []
+for i in range(1000):
+    index.append(t.get_nns_by_item(i, 9)[1:])
+
+index = jnp.stack(np.array(index))
 
 class AnnoyMLP(nn.Module):
 
@@ -48,5 +54,14 @@ class AnnoyMLP(nn.Module):
 model = AnnoyMLP(100, 8, 2, [64, 64, 1])
 params = model.init(key, jnp.zeros((1,8), dtype=int))
 
-def loss(x_batched):
-    pred = model.apply(params, x_batched)
+def loss(index):
+    pred = model.apply(params, index)
+    return pred
+
+def loss_query(x_batched):
+    index = []
+    for i in range(len(x_batched)):
+        index.append(t.get_nns_by_item(i, 9)[1:])
+    index = jnp.stack(np.array(index))
+    pred = model.apply(params, index)
+    return pred
