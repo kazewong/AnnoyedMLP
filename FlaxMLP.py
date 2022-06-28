@@ -11,3 +11,8 @@ model = nn.Embed(10,5)
 params = model.init(key, jnp.zeros(1))['params']
 
 class AnnoyMLP(nn.Module):
+
+    def setup(self):
+        pass
+    
+    def 
