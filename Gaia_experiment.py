@@ -33,6 +33,7 @@ x_scale = X_#x_scaler.transform(X_)
 y_scale = Y_#Y_scaler.transform(Y_)
 
 x_index = x_scale[:int(len(x_scale)*0.2)]
+y_index = y_scale[:int(len(y_scale)*0.2)]
 x_train = x_scale[int(len(x_scale)*0.2):int(len(x_scale)*0.8)]
 y_train = y_scale[int(len(y_scale)*0.2):int(len(y_scale)*0.8)]
 x_test = x_scale[int(len(x_scale)*0.8):]
@@ -75,59 +76,77 @@ class AnnoyMLP(nn.Module):
         self.embedding = nn.Embed(self.embeddingSize, self.embeddingFeatures)
         self.layers = [nn.Dense(self.embeddingQuerySize*self.embeddingFeatures),
                         *[nn.Dense(feat, use_bias=self.use_bias, kernel_init=self.kernel_i(self.init_weight_scale, "fan_in", "normal"))
-                         for feat in self.mlpFeatures]]
+                         for feat in self.mlpFeatures],nn.Dense(self.embeddingQuerySize)]
     
     def __call__(self, index):
         x = self.embedding(index)
         x = x.reshape(-1, self.embeddingQuerySize*self.embeddingFeatures)
         for layer in self.layers[:-1]:
             x = self.activation(layer(x))
-        return self.layers[-1](x)
+        output =  self.layers[-1](x)
+        return jnp.mean(output,axis=-1,keepdims=True)
+
+class EmbeddingMean(nn.Module):
+
+    embeddingSize: int
+    embeddingFeatures: int
+
+    def setup(self):
+        self.embedding = nn.Embed(self.embeddingSize, self.embeddingFeatures)
+    
+    def __call__(self, index):
+        x = self.embedding(index)[:,:,0]
+        return jnp.mean(x,axis=-1,keepdims=True)
 
 
-model = AnnoyMLP(x_index.shape[0], 8, 2, [128, 128, 1])
+model = AnnoyMLP(x_index.shape[0], 8, 1, [32, 32])
+model_baseline = EmbeddingMean(x_index.shape[0], 1)
 
-def create_train_state(rng, learning_rate, momentum):
-    params = model.init(key, jnp.zeros((100,8), dtype=int))
-    tx = optax.adam(learning_rate, momentum)
-    return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
 key = jax.random.PRNGKey(1071)
 rng, init_rng = jax.random.split(key, 2)
-learning_rate = 0.01
+learning_rate = 10
 momentum = 0.9
 
-state = create_train_state(init_rng, learning_rate, momentum)
+params = model.init(rng, jnp.zeros((100,8), dtype=int))
+# params = model_baseline.init(rng, jnp.zeros((100,8), dtype=int))
+
+tx = optax.adam(learning_rate=learning_rate)
+opt_state = tx.init(params)
+
 
 @jax.jit
-def train_step(state, x, y):
+def train_step(params, opt_state, x, y):
     def loss(params):
+        # pred_y = model_baseline.apply(params, x)
         pred_y = model.apply(params, x)
         return jnp.mean(jnp.square(pred_y - y))
     grad_fn = jax.value_and_grad(loss)
-    value, grad = grad_fn(state.params)
-    state = state.apply_gradients(grads=grad)
-    return state
+    value, grad = grad_fn(params)
+    updates, opt_state = tx.update(grad, opt_state)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state
 
 @jax.jit
 def eval_step(params, x, y):
+    # pred_y = model_baseline.apply(params, x)
     pred_y = model.apply(params, x)
     return jnp.mean(jnp.square(pred_y - y))
 
 
-num_epochs = 10000
+num_epochs = 30000
 
 loss = 1e10
-save_state = copy.copy(state)
 for epoch in range(1, num_epochs + 1):
     # Use a separate PRNG key to permute image data during shuffling
     rng, input_rng = jax.random.split(rng)
     # Run an optimization step over a training batch
-    state = train_step(state, train_index, y_train)
-    loss_local = eval_step(state.params, test_index, y_test)
+    params, opt_state = train_step(params, opt_state, train_index, y_train)
+    loss_local = eval_step(params, test_index, y_test)
     if epoch % 100 == 0:
         print('Epoch %d' % epoch)
         print('Loss: %.3f' % loss_local)
     if loss_local < loss:
         loss = loss_local
-        save_state = copy.copy(state)
+        save_params = copy.copy(params)
+        save_state = copy.copy(opt_state)
